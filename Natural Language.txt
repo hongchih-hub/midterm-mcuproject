@@ -1,1 +1,106 @@
+// ==========================================
+// TACTICAL DEFUSAL SIMULATOR - FINAL LOGIC
+// ==========================================
 
+// --- GLOBAL VARIABLES ---
+Enum State { SAFE, STANDBY, COUNTDOWN, DETONATED }
+Variable currentState = SAFE
+Variable timeLeftMs = 0
+Variable deathReason = ""
+
+// --- 1. SETUP ---
+Function Setup():
+    Set_SystemClock(170MHz)
+    Set_UART(PA2, PA3)                  // For PC terminal
+    Set_EXTI_ShakeSensor(PA0)           // Shake sensor
+    Set_GPIO_Wires(PA10, PA11, PA12)    // Cut wires
+    Set_PWM_Buzzer(PA8)                 // Sound
+    Set_PWM_Green_LED(PA6)              // Breathing / Blinking
+    Set_GPIO_Red_LED(PA7)               // Warning / Boom
+    
+    Print("[Boot] Safe Mode. Type 'START' to arm.")
+
+// --- 2. INTERRUPTS (Hardware triggers) ---
+
+// 2A. PC Terminal (UART)
+Function On_UART_Receive(input):
+    IF input == "START" AND currentState == SAFE:
+        currentState = STANDBY
+        Print("[Armed] Enter time (e.g., '10s').")
+        
+    ELSE IF input has "s" (e.g. "15s") AND currentState == STANDBY:
+        timeLeftMs = GetNumber(input) * 1000
+        currentState = COUNTDOWN
+        Print("[Countdown Started]")
+        
+    ELSE IF input == "DETONATE" AND currentState != SAFE:
+        deathReason = "Terminal command"
+        currentState = DETONATED
+
+// 2B. Shake Sensor (EXTI)
+Function On_Shake_Sensor():
+    IF currentState == STANDBY OR currentState == COUNTDOWN:
+        deathReason = "Vibration detected"
+        currentState = DETONATED
+    // Do nothing if SAFE
+
+// 2C. 1ms Timer
+Function On_1ms_Timer():
+    IF currentState == COUNTDOWN AND timeLeftMs > 0:
+        timeLeftMs = timeLeftMs - 1
+        
+    IF currentState == SAFE:
+        Update_Breathing_Math() // Calculate green brightness
+
+// --- 3. MAIN LOOP ---
+Function MainLoop():
+    Setup()
+    
+    WHILE True:
+        SWITCH (currentState):
+        
+            CASE SAFE:
+                Set_Green_LED_Brightness( calculatedValue )
+                Turn_Off_Red_LED()
+                Turn_Off_Buzzer()
+                
+            CASE STANDBY:
+                // Check Wires
+                IF Any_Wire_Is_Cut():
+                    deathReason = "Wire cut"
+                    currentState = DETONATED
+                    
+                // Green LED blinks 1.5s ON, 1.5s OFF
+                Play_Green_LED_Blink(1500)
+                Turn_Off_Red_LED()
+                
+            CASE COUNTDOWN:
+                Turn_Off_Green_LED()
+                
+                // 1. Check Time & Wires
+                IF timeLeftMs <= 0:
+                    deathReason = "Time out"
+                    currentState = DETONATED
+                IF Any_Wire_Is_Cut():
+                    deathReason = "Wire cut"
+                    currentState = DETONATED
+                    
+                // 2. Sound & Red LED sync
+                Variable beepSpeed = 1000 // default 1000ms (1Hz)
+                
+                IF timeLeftMs > 15000:
+                    beepSpeed = 1000 // Normal speed
+                ELSE:
+                    beepSpeed = Calculate_Fast_Speed(timeLeftMs) // Goes faster
+                    
+                Play_Red_LED_And_Buzzer_Sync(beepSpeed)
+                
+            CASE DETONATED:
+                Turn_Off_Green_LED()
+                Turn_On_Red_LED()          // Solid Red
+                Play_Buzzer_Tone(1000Hz)   // Continuous sound
+                Print("[BOOM] " + deathReason)
+                
+                WHILE True:
+                    // Stop everything. Press physical RESET button on board.
+                    Wait()
