@@ -1,0 +1,102 @@
+# 💣 戰術拆彈模擬器 (Tactical Defusal Simulator) - 系統設定指南
+
+本文件記錄了「戰術拆彈模擬器」專案在 STM32CubeMX 的底層硬體設定、Tera Term 序列埠終端機設定，以及完整的實體電路接線規範。
+
+---
+
+## 一、 STM32CubeMX 硬體與週邊設定
+
+請在 STM32CubeMX (`.ioc`) 中進行以下設定，確保與程式碼完美對應：
+
+### 1. System Core (系統核心)
+*   **RCC**: 
+    *   High Speed Clock (HSE) 設為 `Crystal/Ceramic Resonator`（若使用外部晶振）或使用內部 `HSI`。
+*   **SYS**: 
+    *   Debug 設為 `Serial Wire` (SWD)。
+*   **Clock Configuration (時鐘樹)**:
+    *   SYSCLK 設定為 `170 MHz`（適用於 STM32G474RE）。
+
+---
+
+### 2. Timers (計時器與 PWM 輸出)
+*   **TIM3 (綠燈呼吸燈 - PA6)**:
+    *   Channel 1: 設為 `PWM Generation CH1`
+    *   Prescaler (預分頻器): `16`
+    *   Counter Period (自動重載值 / 周期): `999`
+    *   PWM Mode: `PWM mode 1`
+*   **TIM1 (被動式蜂鳴器 2kHz 警報 - PA8)**:
+    *   Channel 1: 設為 `PWM Generation CH1`
+    *   Prescaler (預分頻器): `169`
+    *   Counter Period (自動重載值 / 周期): `499` *(精準產生 2kHz 方波)*
+    *   PWM Mode: `PWM mode 1`
+
+---
+
+### 3. GPIO (輸入輸出與外部中斷)
+*   **PA0 (震動感測器訊號)**:
+    *   Mode: `GPIO_EXTI0` (外部中斷第 0 線)
+    *   GPIO mode: `External Interrupt Mode with Rising/Falling edge trigger detection` (雙邊緣觸發)
+    *   Pull-up/Pull-down: `No pull-up and no pull-down`
+    *   *【NVIC 設定】*: 必須在 NVIC 中打勾啟用 `EXTI line0 interrupt`。
+*   **PA7 (紅燈指示燈)**:
+    *   Mode: `GPIO_Output` (推挽輸出)
+    *   GPIO Pull-up/Pull-down: `No pull-up and no pull-down`
+    *   Maximum output speed: `Low`
+*   **PA10, PA11, PA12 (剪線陷阱 1~3)**:
+    *   Mode: `GPIO_Input` (數位輸入)
+    *   GPIO Pull-up/Pull-down: **`Pull-up` (內部上拉電阻，極重要！)**
+
+---
+
+### 4. Connectivity (序列埠通訊)
+*   **USART2 (與電腦終端機通訊)**:
+    *   Mode: `Asynchronous` (非同步)
+    *   Baud Rate: `115200` Bits/s
+    *   Word Length: `8 Bits`
+    *   Parity: `None`
+    *   Stop Bits: `1`
+    *   *【NVIC 設定】*: 必須在 NVIC 中打勾啟用 `USART2 global interrupt`。
+
+---
+
+## 二、 實體電路與模組接線表 (Pinout)
+
+> ⚠️ **注意**：所有模組的 **GND** 必須確實與 NUCLEO 開發板的 **GND** 連接（共地），否則訊號會失效。
+
+| 模組名稱 | 模組腳位 (Pin) | STM32 開發板對應腳位 | 備註說明 |
+| :--- | :--- | :--- | :--- |
+| **震動感測器** (SW-420) | `DO` (數位輸出) | **PA0** | 觸發外部中斷 (EXTI0) |
+| | `VCC` | **3.3V / 5V** | 模組電源 |
+| | `GND` | **GND** | 系統共地 |
+| **綠色 LED** | 長腳 (正極) | **PA6** | TIM3_CH1 呼吸燈 |
+| | 短腳 (負極) | **GND** | 需串接限流電阻 |
+| **紅色 LED** | 長腳 (正極) | **PA7** | 引爆恆亮指示 |
+| | 短腳 (負極) | **GND** | 需串接限流電阻 |
+| **被動式蜂鳴器** | `S` (訊號輸入) | **PA8** | TIM1_CH1 (2kHz PWM 驅動) |
+| | `VCC` | **3.3V / 5V** | 模組電源 |
+| | `GND` | **GND** | 系統共地 |
+| **剪線陷阱 1** | 導線一端 | **PA10** | 搭配內部上拉運作 |
+| | 導線另一端 | **GND** | 拔開即觸發斷线陷阱 |
+| **剪線陷阱 2** | 導線一端 | **PA11** | 搭配內部上拉運作 |
+| | 導線另一端 | **GND** | 拔開即觸發斷线陷阱 |
+| **剪線陷阱 3** | 導線一端 | **PA12** | 搭配內部上拉運作 |
+| | 導線另一端 | **GND** | 拔開即觸發斷线陷阱 |
+
+---
+
+## 三、 Tera Term 序列埠終端機設定
+
+要正確與戰術拆彈模擬器進行序列埠互動（輸入 `START`、倒數秒數如 `10s`、或強制引爆指令 `DETONATE`），請在 Tera Term 中設定以下參數：
+
+1. **連線設定 (Setup ➔ Serial port...)**:
+   *   **Port**: 選擇你的 NUCLEO 開發板對應的 **STMicroelectronics STLink Virtual COM Port**（可在裝置管理員中確認 COM 埠編號）。
+   *   **Baud rate**: `115200`
+   *   **Data**: `8 bit`
+   *   **Parity**: `none`
+   *   **Stop**: `1 bit`
+   *   **Flow control**: `none`
+
+2. **終端機換行設定 (Setup ➔ Terminal...)**:
+   *   **Receive**: `AUTO` (或 `LF`)
+   *   **Transmit**: **`CR+LF`** *(重要：確保按下 Enter 時能正確傳送換行符號給 STM32 指令解析器)*
+   *   勾選 **`Local echo`** *(若希望在畫面上看到自己輸入的指令字元)*
