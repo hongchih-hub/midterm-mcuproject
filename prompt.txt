@@ -1,0 +1,30 @@
+你是一位資深的 STM32 韌體工程師。請為我撰寫一份完整的 STM32 裸機程式（Bare-metal, 基於 HAL 庫），專案名稱為「戰術拆彈模擬器 (Tactical Defusal Simulator)」。
+
+請直接給我完整的 `main.c` 程式碼，必須可以直接編譯，不允許只有片段。
+
+【核心架構要求】
+1. 狀態機 (FSM)：系統必須具備四個狀態：SAFE、STANDBY、COUNTDOWN、DETONATED。
+2. 非阻塞排程 (Non-blocking)：絕對禁止使用 HAL_Delay()。必須在主迴圈開頭計算 `deltaT = currentTick - lastTick`，並讓所有的倒數計時與聲光效果（PWM）依賴 `deltaT` 來推進。
+3. ISR 防呆與極簡化：中斷服務常式 (ISR) 內只能設定 Flag 並立刻關閉該中斷（防物理彈跳）。禁止在 ISR 內呼叫任何耗時或 UART Transmit 函數。
+4. 變數型態規範：所有時間計數與倒數變數（如剩餘時間 `timeLeftMs`）必須使用整數（如 `int32_t` 或 `uint32_t`），絕對禁止使用 `float` 浮點數進行毫秒計時。
+
+【硬體與腳位定義】
+- 震動感測器 (EXTI, 雙邊緣觸發)：PA0。請注意，在 ISR 中請先判斷狀態，只有在 STANDBY 或 COUNTDOWN 時，才設定震動 Flag 並關閉中斷。
+- 剪線陷阱 (GPIO Input, Pull-up)：PA10, PA11, PA12。主迴圈中需偵測，只要任何一條線變成 HIGH (浮接)，立即觸發引爆。
+- 綠色指示燈 (TIM3 PWM)：PA6。
+- 致命紅燈 (GPIO Output)：PA7。引爆時點亮。
+- 蜂鳴器 (TIM1 PWM, 2kHz)：PA8。
+- 序列埠通訊 (USART2, 115200)：非阻塞中斷接收 (Receive_IT)。
+
+【系統狀態與功能細節】
+1. SAFE：開機預設。綠燈呈現平滑的呼吸燈效果（週期 2 秒）。蜂鳴器靜音。
+2. STANDBY：當 UART 接收到 "START" 字串時進入此模式。綠燈改為慢速閃爍。若發生震動或剪線，進入 DETONATED。注意：從 SAFE 切換到 STANDBY 要重新武裝感測器時，務必先呼叫 `__HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);` 再啟用中斷，避免累積雜訊誤觸發。
+3. COUNTDOWN：當 UART 接收到類似 "10s" (包含 's' 並轉換為數字) 時進入。根據 `deltaT` 扣減剩餘時間。
+   - 動態聲光效果 (線性加速)：倒數期間綠燈與蜂鳴器同步閃爍/鳴叫。隨著時間逼近（如最後 15 秒內），請採用**線性數學內插公式**（利用 `timeLeftMs` 計算比例）來平滑縮短閃爍與鳴叫的間隔時間，使其一毫秒一毫秒漸進式變快，**嚴禁使用多段 if-else 寫死的階梯式頻率切換**。
+   - 若時間歸零、發生震動、或偵測到剪線，進入 DETONATED。
+4. DETONATED：關閉綠燈，點亮紅燈，蜂鳴器輸出全開 (持續長鳴)。並透過 UART 印出死亡原因 (如 "Wire cut", "Vibration detected", "Time out")。
+
+【穩定性與除錯規範】
+1. UART 緩衝區防呆：請實作一個安全的環形或索引型 UART 接收緩衝區，若字串超過長度必須丟棄多餘字元以防溢位。僅在收到 `\r` 或 `\n` 時才將字串結尾並交由主迴圈解析 (`ProcessCommand` 函式)。
+2. printf 支援：請覆寫 `_write` 函式，將 `printf` 導向 USART2，方便除錯。
+3. Timer 初始化防死機：在 `MX_TIM1_Init` 內，務必明確加上 `__HAL_RCC_TIM1_CLK_ENABLE();`，並透過 `GPIO_InitTypeDef` 手動強制將 PA8 綁定為 `GPIO_AF6_TIM1` (Alternate Function)，避免硬體死機。UART 增加 "DETONATE" 遠端引爆指令。
