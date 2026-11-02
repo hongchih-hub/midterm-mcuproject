@@ -2,7 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body (Tactical Defusal Simulator)
+  * @brief          : Main program body (Tactical Defusal Simulator - Clock Crash Fixed)
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -24,8 +24,8 @@ typedef enum {
 #define CMD_BUFFER_SIZE 64
 
 /* Private variables ---------------------------------------------------------*/
-TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim1; // 被動式蜂鳴器 PWM
+TIM_HandleTypeDef htim3; // 綠燈 PWM
 UART_HandleTypeDef huart2;
 
 SystemState currentState = SAFE;
@@ -41,6 +41,8 @@ uint8_t cmdReady = 0;
 uint32_t effectTimer = 0;
 uint8_t ledState = 0;
 
+volatile uint8_t vibrationTriggerFlag = 0;
+
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -51,13 +53,15 @@ void ProcessCommand(void);
 void TriggerDetonation(const char* reason);
 
 /* Private user code ---------------------------------------------------------*/
-// 重新導向 printf 到 UART2
+void EXTI0_IRQHandler(void) {
+    HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);
+}
+
 int _write(int file, char *ptr, int len) {
     HAL_UART_Transmit(&huart2, (uint8_t *)ptr, len, HAL_MAX_DELAY);
     return len;
 }
 
-// UART 接收完成中斷回呼函數
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART2) {
         if (rxBuffer[0] == '\r' || rxBuffer[0] == '\n') {
@@ -75,28 +79,26 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     }
 }
 
-// EXTI 外部中斷回呼函數 (搖晃感測器)
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
     if (GPIO_Pin == GPIO_PIN_0) {
         if (currentState == STANDBY || currentState == COUNTDOWN) {
-            TriggerDetonation("Vibration detected");
+            vibrationTriggerFlag = 1;
+            HAL_NVIC_DisableIRQ(EXTI0_IRQn);
         }
     }
 }
 
-// 觸發引爆邏輯
 void TriggerDetonation(const char* reason) {
     strncpy(deathReason, reason, sizeof(deathReason) - 1);
     currentState = DETONATED;
 
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 500); // 蜂鳴器長音
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 250);     // 啟動 2kHz PWM 長鳴
 
     printf("\r\n[BOOM] %s\r\n", deathReason);
 }
 
-// 處理接收到的 UART 指令
 void ProcessCommand(void) {
     if (strcmp(cmdBuffer, "START") == 0 && currentState == SAFE) {
         currentState = STANDBY;
@@ -116,9 +118,6 @@ void ProcessCommand(void) {
     cmdReady = 0;
 }
 
-/**
-  * @brief  The application entry point.
-  */
 int main(void)
 {
   HAL_Init();
@@ -127,16 +126,16 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_TIM3_Init();
-  MX_TIM1_Init();
+  MX_TIM1_Init(); // 現在內部有啟動時鐘，不會再當機了！
 
-  // 啟動 UART 中斷接收
   HAL_UART_Receive_IT(&huart2, rxBuffer, 1);
 
-  // 啟動 PWM
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);
 
   printf("\r\n[Boot] Safe Mode. Type 'START' to arm.\r\n");
   lastTick = HAL_GetTick();
@@ -146,6 +145,11 @@ int main(void)
       uint32_t currentTick = HAL_GetTick();
       uint32_t deltaT = currentTick - lastTick;
       lastTick = currentTick;
+
+      if (vibrationTriggerFlag) {
+          vibrationTriggerFlag = 0;
+          TriggerDetonation("Vibration detected");
+      }
 
       if (cmdReady) {
           ProcessCommand();
@@ -201,21 +205,18 @@ int main(void)
               if (effectTimer >= beepSpeed) {
                   effectTimer = 0;
                   ledState = !ledState;
+
                   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, ledState ? GPIO_PIN_SET : GPIO_PIN_RESET);
-                  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ledState ? 500 : 0);
+                  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ledState ? 250 : 0);
               }
               break;
 
           case DETONATED:
-              while(1) {}
               break;
       }
   }
 }
 
-/**
-  * @brief System Clock Configuration
-  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -245,10 +246,13 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief TIM1 Initialization Function (Buzzer - PA8)
+  * @brief TIM1 Initialization Function
   */
 static void MX_TIM1_Init(void)
 {
+  // 【關鍵修復】補上啟動 TIM1 時鐘電源，防止硬體死機！
+  __HAL_RCC_TIM1_CLK_ENABLE();
+
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
@@ -256,7 +260,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 169;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 999;
+  htim1.Init.Period = 499;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -279,11 +283,20 @@ static void MX_TIM1_Init(void)
   sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
   sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
   HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1);
-  HAL_TIM_MspPostInit(&htim1);
+
+  // 手動將 PA8 強制綁定為 TIM1 的 PWM Alternate Function 輸出
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF6_TIM1;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
 /**
-  * @brief TIM3 Initialization Function (Green LED - PA6)
+  * @brief TIM3 Initialization Function
   */
 static void MX_TIM3_Init(void)
 {
@@ -333,7 +346,6 @@ static void MX_USART2_UART_Init(void)
   huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
   HAL_UART_Init(&huart2);
 
-  // 強制啟用 UART 中斷
   HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(USART2_IRQn);
 }
@@ -345,33 +357,30 @@ static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PA0 (Shake Sensor) */
+  // 震動模組設定 (PA0)
   GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING; // 下降緣觸發
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  // 強制啟用 EXTI0 中斷
   HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
-  /*Configure GPIO pin : PA7 (Red LED) */
+  // 紅燈設定 (PA7)
   GPIO_InitStruct.Pin = GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PA10 PA11 PA12 (Wire Cut) */
+  // 剪線陷阱 (PA10, PA11, PA12)
   GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
@@ -385,4 +394,3 @@ void Error_Handler(void)
   {
   }
 }
-
